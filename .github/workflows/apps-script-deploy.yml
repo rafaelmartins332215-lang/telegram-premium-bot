@@ -1,0 +1,42 @@
+# Envia apps-script/Code.gs para o projeto do Google Apps Script sempre que
+# a branch main muda. Só envia se os testes passarem.
+# Segredos necessários (Settings > Secrets and variables > Actions):
+#   CLASPRC_JSON  conteúdo do arquivo ~/.clasprc.json gerado pelo clasp login
+#   SCRIPT_ID     ID do projeto (Apps Script > Configurações do projeto > IDs)
+name: Atualizar Apps Script
+on:
+  push:
+    branches: [main]
+    paths: ['apps-script/**', '.github/workflows/apps-script-deploy.yml']
+  workflow_dispatch:
+concurrency:
+  group: apps-script-deploy
+  cancel-in-progress: false
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Testes
+        run: node apps-script/tests/run.js
+      - name: Enviar para o Apps Script
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ] || [ -z "$SCRIPT_ID" ]; then
+            echo "::warning::Segredos CLASPRC_JSON e SCRIPT_ID não configurados; nada foi enviado."
+            exit 0
+          fi
+          printf '%s' "$CLASPRC_JSON" > ~/.clasprc.json
+          chmod 600 ~/.clasprc.json
+          # Pasta limpa só com os arquivos do projeto: testes e README não vão.
+          mkdir -p "$RUNNER_TEMP/gas"
+          cp apps-script/Code.gs apps-script/appsscript.json "$RUNNER_TEMP/gas/"
+          cd "$RUNNER_TEMP/gas"
+          printf '{"scriptId":"%s","rootDir":"."}' "$SCRIPT_ID" > .clasp.json
+          npx --yes @google/clasp@2.4.2 push --force
+          rm -f ~/.clasprc.json
