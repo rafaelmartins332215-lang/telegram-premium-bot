@@ -38,6 +38,38 @@ calibração, CLV e arquivamento no Drive rodam sozinhos.
 - `resumoResultados()`: placar geral de greens e reds.
 - `pararScanner()`: remove os acionadores.
 
+## Atualização automática (GitHub → Apps Script)
+
+Toda mudança que entra na branch `main` passa pelos testes e, se passarem,
+é enviada sozinha para o seu projeto do Apps Script
+(`.github/workflows/apps-script-deploy.yml`). Configuração, uma vez só:
+
+1. Ative a API do Apps Script em
+   [script.google.com/home/usersettings](https://script.google.com/home/usersettings).
+2. Num computador com Node.js, rode e faça login com a conta Google do script:
+
+   ```
+   npx @google/clasp@2.4.2 login
+   ```
+
+   Isso cria o arquivo `.clasprc.json` na sua pasta de usuário
+   (`C:\Users\<você>\.clasprc.json` no Windows, `~/.clasprc.json` no Mac/Linux).
+3. No Apps Script, **Configurações do projeto → IDs → ID do script**: copie.
+4. No GitHub, **Settings → Secrets and variables → Actions → New repository
+   secret**, crie:
+   - `CLASPRC_JSON`: todo o conteúdo do `.clasprc.json`
+   - `SCRIPT_ID`: o ID do passo 3
+5. Em **Actions → Atualizar Apps Script → Run workflow**, rode uma vez para
+   testar.
+
+Observações:
+- O envio **substitui todos os arquivos** do projeto do Apps Script pelo
+  `Code.gs` e `appsscript.json` daqui. Não guarde outros arquivos lá.
+- As credenciais do scanner ficam nas Propriedades do script e não são
+  afetadas. Os acionadores também continuam.
+- O `.clasprc.json` dá acesso aos seus scripts do Google: guarde só como
+  segredo do GitHub, nunca no código.
+
 ## Testes
 
 ```
