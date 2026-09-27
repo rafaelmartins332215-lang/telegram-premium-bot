@@ -1,0 +1,15 @@
+name: Testes do Scanner Ouro
+on:
+  push:
+    paths: ['apps-script/**', '.github/workflows/apps-script-tests.yml']
+  pull_request:
+    paths: ['apps-script/**', '.github/workflows/apps-script-tests.yml']
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node apps-script/tests/run.js

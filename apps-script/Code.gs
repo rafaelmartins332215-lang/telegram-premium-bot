@@ -1,9 +1,9 @@
 /**
- * SCANNER OURO V10.8 — Google Apps Script, arquivo único.
+ * SCANNER OURO V10.9 — Google Apps Script, arquivo único.
  * Somente alertas; não aposta. Probabilidades experimentais,
  * com recalibração automática somente após validação dos resultados.
  * Odds API-Football são BACK de casas listadas na API, nunca Lay da Bolsa.
- * Cole em Code.gs e execute instalarScannerOver() uma vez.
+ * Cole em Code.gs e execute instalarScannerOver() uma vez (veja README.md).
  *
  * Credenciais: NÃO ficam no código. Cadastre em
  * Configurações do projeto > Propriedades do script:
@@ -18,7 +18,7 @@ const OURO = {
   get TELEGRAM_CHAT_ID() { return ouroCred('OURO_TELEGRAM_CHAT_ID'); },
   BASE: 'https://v3.football.api-sports.io',
   TZ: 'America/Sao_Paulo',
-  MODELO: 'SCANNER-OURO-V10.8',
+  MODELO: 'SCANNER-OURO-V10.9',
   TETO_DIA: 6900, RESERVA_CONFERENCIA: 250,
   MAX_CHAMADAS: 48, MAX_SEGUNDOS: 125,
   LIVE_LOTE: 18, LIVE_STATS_EXTRA: 7, LIVE_ODDS: 7,
@@ -27,7 +27,16 @@ const OURO = {
   PROB_LIVE: 0.60, PROB_PRE: 0.66, EV_MIN: 0.03,
   COMISSAO: 0, ODD_LIVE_IDADE: 300, ODD_PRE_IDADE: 86400,
   MAX_REGISTROS: 180, AUDITORIA_RETRO_HORAS: 72,
-  APREND_MIN: 60, APREND_JANELA: 80, APREND_VALIDACAO: 20,
+  // Arquiva cedo para não encostar no limite de 500 KB das Propriedades.
+  ARQUIVAR_A_PARTIR: 60, ARQUIVAR_LOTE_MIN: 30,
+  PROPS_LIMITE_ARQUIVO: 300000, PROPS_LIMITE_SINAL: 430000,
+  NAO_ENVIADO_HORAS: 24,
+  // Casas aceitas no pré-jogo (vazio = todas). Ex.: ['Bet365', 'Betano'].
+  // ODD_ESCOLHA: 'MEDIANA' (realista) ou 'MAIOR' (melhor odd do mercado).
+  CASAS: [], ODD_ESCOLHA: 'MEDIANA',
+  CLV_JANELA_MIN: 15, CLV_MAX_RODADA: 3,
+  ACRESCIMO_HT: 2, ACRESCIMO_FT: 4, PESO_MULTIPLICATIVO: 0.5,
+  APREND_MIN: 100, APREND_JANELA: 160, APREND_VALIDACAO: 40,
   APREND_PRIOR: 120, APREND_MAX_AJUSTE: 0.04,
   APREND_GANHO_MIN: 0.002,
   OBS_MAX_POR_GRUPO: 90, OBS_CONSULTA: 20, OBS_MAX_DIAS: 14,
@@ -67,6 +76,11 @@ function ouroDay(offset) {
   return Utilities.formatDate(d, OURO.TZ, 'yyyy-MM-dd');
 }
 function ouroUtcDay() { return new Date().toISOString().slice(0, 10); }
+function ouroR(x, casas) { return Number(Number(x).toFixed(casas || 4)); }
+function ouroTamanhoProps() {
+  const all = ouroProps().getProperties();
+  return Object.keys(all).reduce((n, k) => n + k.length + String(all[k]).length, 0);
+}
 function ouroDiag(reason, j, extra) {
   if (!ouroRun) return;
   const d = ouroRun.d;
@@ -78,7 +92,10 @@ function ouroDiag(reason, j, extra) {
 }
 function ouroRodada(kind, fn) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) { console.log('Outra execução em andamento.'); return null; }
+  // A varredura desiste rápido; conferência e fechamento esperam a varredura acabar.
+  if (!lock.tryLock(kind === 'scan' ? 10000 : 150000)) {
+    console.log('Outra execução em andamento.'); return null;
+  }
   try {
     let quota = ouroGet('OURO10_QUOTA', {day: ouroUtcDay(), used: 0});
     if (quota.day !== ouroUtcDay()) quota = {day: ouroUtcDay(), used: 0};
@@ -154,16 +171,28 @@ function ouroApi(path, ttl, reserve, maxPages) {
   }
   return result;
 }
+// TELEGRAM_RECUSADO_*: o Telegram respondeu 4xx, a mensagem com certeza não saiu.
+// Qualquer outro erro (timeout, 5xx) deixa a entrega incerta.
 function ouroTelegram(msg) {
-  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' +
-    OURO.TELEGRAM_TOKEN + '/sendMessage', {
-      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-      payload: JSON.stringify({chat_id: OURO.TELEGRAM_CHAT_ID,
-        text: String(msg).slice(0, 3900), disable_web_page_preview: true})
-    });
-  const data = JSON.parse(res.getContentText());
-  if (!data.ok) throw Error('TELEGRAM_' + res.getResponseCode());
-  return data.result && data.result.message_id;
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    const res = UrlFetchApp.fetch('https://api.telegram.org/bot' +
+      OURO.TELEGRAM_TOKEN + '/sendMessage', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        payload: JSON.stringify({chat_id: OURO.TELEGRAM_CHAT_ID,
+          text: String(msg).slice(0, 3900), disable_web_page_preview: true})
+      });
+    const code = res.getResponseCode();
+    let data = {};
+    try { data = JSON.parse(res.getContentText()); } catch (e) {}
+    if (data.ok) return data.result && data.result.message_id;
+    const retry = ouroN((data.parameters || {}).retry_after);
+    if (code === 429 && tentativa === 0 && retry !== null && retry <= 20) {
+      Utilities.sleep((retry + 1) * 1000); continue;
+    }
+    throw Error((code >= 400 && code < 500 ? 'TELEGRAM_RECUSADO_' : 'TELEGRAM_INCERTO_') +
+      code + ' ' + String(data.description || '').slice(0, 80));
+  }
+  throw Error('TELEGRAM_RECUSADO_429');
 }
 function ouroPeriodo(j) {
   if (!j || !j.fixture || !j.fixture.status || !j.goals) return null;
@@ -251,16 +280,40 @@ function ouroHistorico(j, teamId, local, period) {
   cache.put(key, JSON.stringify(result), 3600);
   return result;
 }
+// Parcela dos gols de uma partida por faixa de 15 min (média de ligas
+// europeias: ~45% no 1º tempo, final de jogo mais aberto). O acréscimo
+// entra na última faixa de cada tempo.
+function ouroPerfilGols() {
+  return [[0, 15, 0.135], [15, 30, 0.150], [30, 45 + OURO.ACRESCIMO_HT, 0.165],
+    [45, 60, 0.160], [60, 75, 0.175], [75, 90 + OURO.ACRESCIMO_FT, 0.215]];
+}
+// Fração dos gols esperados do período que ainda falta a partir do minuto m.
+function ouroFracaoRestante(period, m) {
+  const perfil = ouroPerfilGols();
+  const bins = period === 'HT' ? perfil.slice(0, 3) :
+    period === '2H' ? perfil.slice(3) : perfil;
+  let total = 0, resto = 0;
+  bins.forEach(b => {
+    total += b[2];
+    const sobra = Math.max(0, b[1] - Math.max(b[0], m));
+    resto += b[2] * Math.min(1, sobra / (b[1] - b[0]));
+  });
+  return total ? resto / total : 0;
+}
 function ouroModelo(j, period, pressureData) {
   const home = ouroHistorico(j, j.teams.home.id, true, period);
   const away = ouroHistorico(j, j.teams.away.id, false, period);
-  const hg = Math.min(3.8, Math.max(0.08, (home.gf + away.ga) / 2));
-  const ag = Math.min(3.8, Math.max(0.08, (away.gf + home.ga) / 2));
+  // Mistura média aditiva com o modelo multiplicativo (ataque × defesa ÷ média),
+  // que valoriza o confronto entre ataque forte e defesa fraca.
+  const media = Math.max(0.15, (home.gf + home.ga + away.gf + away.ga) / 4);
+  const w = OURO.PESO_MULTIPLICATIVO;
+  const clamp = x => Math.min(3.8, Math.max(0.08, x));
+  const hg = clamp((1 - w) * (home.gf + away.ga) / 2 + w * home.gf * away.ga / media);
+  const ag = clamp((1 - w) * (away.gf + home.ga) / 2 + w * away.gf * home.ga / media);
   const m = j.fixture.status.short === 'NS' ? 0 :
     Number(j.fixture.status.elapsed);
-  const remain = period === 'HT' ? 45 - m : 90 - m;
-  const duration = period === 'MATCH' ? 90 : 45;
-  if (remain <= 0) return null;
+  const fracao = ouroFracaoRestante(period, m);
+  if (!(fracao > 0)) return null;
   let pressure = 1, shots5 = null, target5 = null, sensibilidadePressao = null;
   if (pressureData) {
     const shots = pressureData.shots;
@@ -269,11 +322,15 @@ function ouroModelo(j, period, pressureData) {
     shots5 = shots * 5 / pressureData.minutes;
     target5 = target * 5 / pressureData.minutes;
     const basePressure = Math.max(0.85, Math.min(1.18, 0.92 + shots5 * 0.09 + target5 * 0.06));
-    sensibilidadePressao = ouroSensibilidadePressao().sensibilidade;
+    if (ouroRun && ouroRun.sens !== undefined) sensibilidadePressao = ouroRun.sens;
+    else {
+      sensibilidadePressao = ouroSensibilidadePressao().sensibilidade;
+      if (ouroRun) ouroRun.sens = sensibilidadePressao;
+    }
     pressure = Math.max(0.85, Math.min(1.18,
       1 + (basePressure - 1) * sensibilidadePressao));
   }
-  const lambda = (hg + ag) * remain / duration * pressure;
+  const lambda = (hg + ag) * fracao * pressure;
   const p0 = Math.exp(-lambda), p1 = p0 * lambda;
   return {lambda, p0, p1, p2: 1 - p0 - p1, p05: 1 - p0,
     shots5, target5, pressure, hg, ag,
@@ -323,7 +380,7 @@ function ouroEvMinAjustado(model) {
     OURO.EV_MIN_AMOSTRA_BAIXA : 0);
 }
 // Recalibração local: usa previsões feitas antes do jogo terminar e
-// conferidas no FT. Cada mercado e modo tem até 80 resultados.
+// conferidas no FT. Cada mercado e modo guarda até 160 resultados.
 function ouroChaveAprendizado(mode, market) {
   const names = ['OVER_05_HT', 'OVER_05_2T', 'OVER_10_ASIAN_FT', 'OVER_15_FT'];
   return ['PRE', 'LIVE'].includes(mode) && names.includes(market) ?
@@ -409,7 +466,8 @@ function ouroRegistrarAprendizado(r, source) {
       (r.market !== 'OVER_10_ASIAN_FT' && win + loss < 0.999)) return;
   const stored = ouroGet(key, []), rows = Array.isArray(stored) ? stored : [];
   const id = String(r.fixtureId);
-  const value = [id, win, loss, r.resultado, source === 'O' ? 'O' : 'S'];
+  // Valores arredondados: 160 linhas precisam caber nos 9 KB de uma propriedade.
+  const value = [id, ouroR(win), ouroR(loss), r.resultado, source === 'O' ? 'O' : 'S'];
   const index = rows.findIndex(x => String(x[0]) === id);
   if (index !== -1) {
     // A previsão do sinal entregue prevalece sobre observações sem alerta.
@@ -417,23 +475,27 @@ function ouroRegistrarAprendizado(r, source) {
     if (JSON.stringify(rows[index]) === JSON.stringify(value)) return;
     rows[index] = value;
   } else rows.push(value);
-  ouroSet(key, rows.slice(-OURO.APREND_JANELA));
+  ouroSet(key, rows.slice(-OURO.APREND_JANELA).map(x =>
+    [x[0], ouroR(x[1]), ouroR(x[2]), x[3], x[4]]));
 }
-// Calibração da sensibilidade do coeficiente de pressão: compara a taxa de
-// acerto de sinais LIVE com pressão alta vs. baixa/neutra já auditados.
+// Calibração da sensibilidade do coeficiente de pressão: compara o erro de
+// previsão (resultado − probabilidade prevista) de sinais LIVE com pressão
+// alta vs. baixa/neutra. Usar o erro, e não a taxa de green bruta, evita
+// misturar mercados com taxas-base diferentes. Devoluções ficam de fora.
 // Enquanto não há amostra suficiente, a sensibilidade fica em 1 (neutra).
-function ouroChavePressaoCalib() { return 'OURO10_PRESS_SENS'; }
+function ouroChavePressaoCalib() { return 'OURO10_PRESS_SENS2'; }
 function ouroRegistrarPressao(r) {
   if (r.mode !== 'LIVE' || !r.enviado || !r.auditoriaFinal ||
-      !['GREEN', 'RED', 'DEVOLVIDA'].includes(r.resultado) ||
+      !['GREEN', 'RED'].includes(r.resultado) ||
       !/^SCANNER-OURO-V10\./.test(String(r.modelo || ''))) return;
   const pressao = r.entradaDados && ouroN(r.entradaDados.pressao);
-  if (pressao === null) return;
+  const pWin = ouroN(r.pWinBase === undefined ? r.pWin : r.pWinBase);
+  if (pressao === null || pWin === null) return;
   const key = ouroChavePressaoCalib();
   const stored = ouroGet(key, []), rows = Array.isArray(stored) ? stored : [];
   const id = r.fixtureId + '_' + r.market;
-  const win = r.resultado === 'GREEN' ? 1 : 0;
-  const value = [String(id), pressao, win];
+  const residuo = (r.resultado === 'GREEN' ? 1 : 0) - pWin;
+  const value = [String(id), ouroR(pressao, 3), ouroR(residuo)];
   const index = rows.findIndex(x => x[0] === value[0]);
   if (index !== -1) rows[index] = value; else rows.push(value);
   ouroSet(key, rows.slice(-OURO.PRESSAO_CALIB_JANELA));
@@ -450,16 +512,17 @@ function ouroSensibilidadePressao() {
   if (alta.length < 15 || baixa.length < 15) {
     summary.status = 'EM OBSERVAÇÃO'; return summary;
   }
-  const taxaAlta = alta.reduce((s, x) => s + x[2], 0) / alta.length;
-  const taxaBaixa = baixa.reduce((s, x) => s + x[2], 0) / baixa.length;
-  const diff = taxaAlta - taxaBaixa;
-  summary.taxaAlta = Number(taxaAlta.toFixed(4));
-  summary.taxaBaixa = Number(taxaBaixa.toFixed(4));
+  // Erro médio positivo = o modelo subestimou os greens daquele grupo.
+  const erroAlta = alta.reduce((s, x) => s + x[2], 0) / alta.length;
+  const erroBaixa = baixa.reduce((s, x) => s + x[2], 0) / baixa.length;
+  const diff = erroAlta - erroBaixa;
+  summary.erroAlta = ouroR(erroAlta);
+  summary.erroBaixa = ouroR(erroBaixa);
   if (Math.abs(diff) < OURO.PRESSAO_GANHO_MIN) {
     summary.status = 'EM OBSERVAÇÃO'; return summary;
   }
   const shrink = n / (n + OURO.APREND_PRIOR);
-  const raw = 1 + diff * 2 * shrink;
+  const raw = 1 + diff * 3 * shrink;
   summary.status = 'ATIVO';
   summary.sensibilidade = Number(Math.max(OURO.PRESSAO_SENS_MIN,
     Math.min(OURO.PRESSAO_SENS_MAX, raw)).toFixed(3));
@@ -490,7 +553,7 @@ function ouroObservar(j, mode, market, win, loss) {
   const stored = ouroGet(obsKey, []), rows = Array.isArray(stored) ? stored : [];
   if (rows.some(x => String(x[0]) === String(j.fixture.id)) ||
       rows.length >= OURO.OBS_MAX_POR_GRUPO) return false;
-  rows.push([String(j.fixture.id), win, loss, Date.now(), kickoff + 105 * 60000]);
+  rows.push([String(j.fixture.id), ouroR(win), ouroR(loss), Date.now(), kickoff + 105 * 60000]);
   ouroSet(obsKey, rows); return true;
 }
 function ouroConferirObservacoes() {
@@ -572,9 +635,25 @@ function ouroMarket(name, period, asian) {
   if (period === '2H') return second && !first;
   return !first && !second && !/half|\b[12]h\b/.test(s);
 }
-function ouroOdd(j, period, line, live) {
+function ouroCasaAceita(book, live) {
+  const casas = Array.isArray(OURO.CASAS) ? OURO.CASAS.filter(Boolean) : [];
+  if (live || !casas.length) return true;
+  const nome = String(book || '').toLowerCase();
+  return casas.some(c => nome.includes(String(c).toLowerCase()));
+}
+// Escolhe a cotação usada no cálculo do EV. MEDIANA pega a mediana inferior
+// das cotações válidas (preço que você realmente encontra); MAIOR pega a melhor.
+function ouroEscolherOdd(found) {
+  if (!found.length) return null;
+  const desc = found.slice().sort((a, b) => b.odd - a.odd);
+  const escolhida = OURO.ODD_ESCOLHA === 'MAIOR' ? desc[0] :
+    desc.slice().reverse()[Math.floor((desc.length - 1) / 2)];
+  return Object.assign({}, escolhida, {maior: desc[0].odd, casaMaior: desc[0].book,
+    cotacoes: desc.length, todas: desc});
+}
+function ouroOdd(j, period, line, live, ttl) {
   const path = (live ? '/odds/live?fixture=' : '/odds?fixture=') + j.fixture.id;
-  const raw = ouroApi(path, live ? 0 : 900, 2, live ? 2 : 8);
+  const raw = ouroApi(path, live ? 0 : (ttl === undefined ? 900 : ttl), 2, live ? 2 : 8);
   const found = [], names = [], reasons = {};
   const fail = k => { reasons[k] = (reasons[k] || 0) + 1; };
   raw.forEach(r => {
@@ -600,6 +679,7 @@ function ouroOdd(j, period, line, live) {
       if (!Number.isFinite(age) || age < -60 ||
           age > (live ? OURO.ODD_LIVE_IDADE : OURO.ODD_PRE_IDADE))
         { fail('DATA_ODD'); return; }
+      if (!ouroCasaAceita(book.name, live)) { fail('CASA'); return; }
       (book.bets || []).forEach(bet => {
         if (names.length < 15 && bet.name) names.push(bet.name);
         if (!ouroMarket(bet.name, period, line === 1)) { fail('MERCADO'); return; }
@@ -628,7 +708,7 @@ function ouroOdd(j, period, line, live) {
   }
   if (!found.length) ouroDiag('SEM_ODD_' + (live ? 'LIVE' : 'PRE'), j,
     JSON.stringify({registros: raw.length, motivos: reasons, mercados: names.slice(0, 8)}));
-  return found[0] || null;
+  return ouroEscolherOdd(found);
 }
 function ouroRegistros() {
   return Object.keys(ouroProps().getProperties()).filter(k => /^OURO10_S_/.test(k));
@@ -659,6 +739,9 @@ function ouroTextoSinal(r) {
     ouroDate(r.inicio) + ' BRT\n' + entry + '\n' +
     ouroMercadoTexto(market) + ' | Odd BACK ' + ouroOddTexto(r.odd) + '\n' +
     'Fonte: ' + r.fonte + ' (API, ' + ouroDate(r.updated) + ' BRT)\n' +
+    (ouroN(r.oddMaior) !== null && r.oddMaior > r.odd ?
+      'Maior odd vista: ' + ouroOddTexto(r.oddMaior) + ' (' + r.casaMaior + ') | ' +
+      r.cotacoes + ' cotações\n' : '') +
     'Probabilidade experimental: ' + ouroPct(r.pWin) +
     ' | Odd mín.: ' + ouroOddTexto(ouroMinOdd(r.pWin, r.pLoss, r.evMinAplicado)) +
     ' | EV est.: ' + ouroPct(r.ev) + '\n' +
@@ -672,14 +755,19 @@ function ouroSinal(j, mode, market, period, line, quote, win, loss, model) {
   if (ouroRegistros().length >= OURO.MAX_REGISTROS) {
     ouroDiag('REGISTROS_CHEIOS', j); return false;
   }
+  if (ouroTamanhoProps() > OURO.PROPS_LIMITE_SINAL) {
+    ouroDiag('PROPRIEDADES_CHEIAS', j); return false;
+  }
   const rec = {fixtureId: j.fixture.id, modelo: OURO.MODELO,
     mode, market, period, line,
     pWinBase: model.calibracao ? model.calibracao.baseWin : win,
     pLossBase: model.calibracao ? model.calibracao.baseLoss : loss,
-    aprendizado: model.calibracao ? model.calibracao.meta : null,
+    aprendizado: model.calibracao ? {status: model.calibracao.meta.status,
+      amostra: model.calibracao.meta.amostra} : null,
     evMinAplicado: ouroN(model.evMinAplicado),
     odd: quote.odd, fonte: quote.book, updated: quote.updated,
-    mercadoAPI: quote.market,
+    mercadoAPI: quote.market, oddMaior: ouroN(quote.maior),
+    casaMaior: quote.casaMaior || null, cotacoes: ouroN(quote.cotacoes),
     inicio: j.fixture.date, liga: j.league.name, casa: j.teams.home.name,
     fora: j.teams.away.name, minuto: mode === 'LIVE' ? j.fixture.status.elapsed : 0,
     score: mode === 'PRE' ? 'ND (pré-jogo)' :
@@ -708,7 +796,16 @@ function ouroSinal(j, mode, market, period, line, quote, win, loss, model) {
     ouroSet(key, rec);
     return true;
   } catch (e) {
-    ouroDiag('FALHA_TELEGRAM_ENTREGA_INCERTA', j, e.message);
+    if (/^TELEGRAM_RECUSADO_/.test(e.message)) {
+      // Não saiu: apaga o registro para o sinal poder ser tentado de novo.
+      ouroProps().deleteProperty(key);
+      ouroDiag('FALHA_TELEGRAM', j, e.message);
+    } else {
+      // Pode ter saído: mantém o registro para não duplicar; é limpo depois.
+      rec.entregaIncerta = true;
+      ouroSet(key, rec);
+      ouroDiag('FALHA_TELEGRAM_ENTREGA_INCERTA', j, e.message);
+    }
     throw e;
   }
 }
@@ -903,6 +1000,36 @@ function ouroPre(d) {
   d.oddsPreConsultadas = oddsCount;
   ouroSet('OURO10_PRE_LAST', Date.now());
 }
+// CLV: perto do início do jogo, busca de novo a odd do mercado do sinal
+// pré-jogo. Odd do sinal acima da de fechamento (CLV > 0) é o melhor
+// indicador de vantagem real, bem antes de o ROI ter amostra.
+function ouroFechamentoOdds(d) {
+  const now = Date.now();
+  const alvos = ouroRegistros().map(k => ({k, r: ouroGet(k, null)})).filter(x => {
+    const r = x.r;
+    if (!r || !r.enviado || r.mode !== 'PRE' || r.resultado !== 'PENDENTE' ||
+        r.oddFechamento !== undefined || ouroN(r.line) === null) return false;
+    const falta = Date.parse(r.inicio) - now;
+    return falta >= -2 * 60000 && falta <= OURO.CLV_JANELA_MIN * 60000;
+  }).slice(0, OURO.CLV_MAX_RODADA);
+  alvos.forEach(x => {
+    if (ouroRun.calls >= ouroRun.budget - 3) return;
+    const r = x.r;
+    const j = {fixture: {id: r.fixtureId},
+      teams: {home: {name: r.casa}, away: {name: r.fora}}};
+    let quote;
+    try { quote = ouroOdd(j, 'MATCH', Number(r.line), false, 0); }
+    catch (e) { ouroDiag('ERRO_CLV', j, e.message); return; }
+    if (!quote) return;
+    const mesma = (quote.todas || []).find(q => q.book === r.fonte);
+    const fech = mesma || quote;
+    r.oddFechamento = fech.odd;
+    r.fonteFechamento = fech.book;
+    r.clv = ouroR(r.odd / fech.odd - 1);
+    ouroSet(x.k, r);
+    d.clvRegistrados++;
+  });
+}
 function ouroChecarErrosConsecutivos(d) {
   const seq = ouroGet('OURO10_ERRSEQ', 0);
   if (d.erros.length) {
@@ -922,10 +1049,11 @@ function rodarScannerOver() {
   return ouroRodada('scan', () => {
     const d = {at: ouroDate(), live: 0, janelaLive: 0, liveSelecionados: 0,
       oddsLiveConsultadas: 0, agenda: 0, preElegiveis: 0, preSelecionados: 0,
-      preAnalisados: 0, oddsPreConsultadas: 0, sinais: 0,
+      preAnalisados: 0, oddsPreConsultadas: 0, sinais: 0, clvRegistrados: 0,
       motivos: {}, amostras: [], erros: []};
     ouroRun.d = d;
     try { ouroLive(d); } catch (e) { d.erros.push('LIVE: ' + e.message); }
+    try { ouroFechamentoOdds(d); } catch (e) { d.erros.push('CLV: ' + e.message); }
     try { ouroPre(d); } catch (e) { d.erros.push('PRE: ' + e.message); }
     d.calls = ouroRun.calls; d.budget = ouroRun.budget;
     d.quota = ouroRun.quota.used; d.routes = ouroRun.routes;
@@ -946,7 +1074,7 @@ function ouroResumoAuto(d) {
     .sort((x, y) => a.reasons[y] - a.reasons[x]).slice(0, 6)
     .map(k => a.reasons[k] + ' ' + k).join('\n');
   ouroSet('OURO10_RESUMO', {last: Date.now(), rounds: 0, signals: 0, reasons: {}});
-  try { ouroTelegram('RESUMO OURO V10.8 ' + ouroDate() + ' BRT\nRodadas: ' +
+  try { ouroTelegram('RESUMO OURO V10.9 ' + ouroDate() + ' BRT\nRodadas: ' +
     a.rounds + ' | Sinais: ' + a.signals + '\nAo vivo: ' + d.live +
     ' | Na janela: ' + d.janelaLive + '\nPré elegíveis: ' + d.preElegiveis +
     '\nMotivos:\n' + (reasons || 'Nenhum') + '\nAPI: ' + d.quota +
@@ -1086,31 +1214,51 @@ function ouroAvisarResultado(key, r) {
     return false;
   }
 }
+// Sinais cuja entrega ao Telegram ficou incerta não entram na conferência;
+// depois de NAO_ENVIADO_HORAS são apagados para não ocupar espaço.
+function ouroLimparNaoEnviados() {
+  let n = 0;
+  ouroRegistros().forEach(k => {
+    const r = ouroGet(k, null);
+    const idade = r ? Date.now() - Date.parse(r.criado || '') : Infinity;
+    if (r && r.enviado === false && !(idade < OURO.NAO_ENVIADO_HORAS * 3600000)) {
+      ouroProps().deleteProperty(k); n++;
+    }
+  });
+  return n;
+}
 function conferirResultadosPendentes() {
   const out = ouroRodada('settle', () => {
-    const eligible = ouroTodosRegistros().filter(k => {
-      const r = ouroGet(k, null);
-      return r && r.fixtureId && (r.resultado === 'PENDENTE' ||
+    const limpos = ouroLimparNaoEnviados();
+    // Lê todas as propriedades uma vez só e trabalha em memória.
+    const all = ouroProps().getProperties(), recs = {};
+    Object.keys(all).filter(k => /^(OURO10_S_|OV9_S_)/.test(k)).forEach(k => {
+      try { recs[k] = JSON.parse(all[k]); } catch (e) {}
+    });
+    const eligible = Object.keys(recs).filter(k => {
+      const r = recs[k];
+      return r && r.fixtureId && r.enviado !== false && (r.resultado === 'PENDENTE' ||
         (r.enviado && !r.notificado) || ouroPrecisaAuditoria(r));
     });
     if (!eligible.length) return {pendentes: 0, concluidos: 0,
-      auditorias: 0, avisos: 0, observacoes: ouroConferirObservacoes()};
+      auditorias: 0, avisos: 0, naoEnviadosLimpos: limpos,
+      observacoes: ouroConferirObservacoes()};
     const cursor = ouroGet('OURO10_CONFCURSOR', 0) % eligible.length;
     const keys = eligible.slice(cursor).concat(eligible.slice(0, cursor)).slice(0, 50);
     ouroSet('OURO10_CONFCURSOR', (cursor + keys.length) % eligible.length);
     let done = 0, avisos = 0, auditorias = 0;
     // Resultados já conferidos são reenviados sem depender de nova consulta à API.
     keys.forEach(k => {
-      const r = ouroGet(k, null);
+      const r = recs[k];
       if (r.resultado !== 'PENDENTE' && r.conferencia &&
           ouroAvisarResultado(k, r)) avisos++;
     });
     const query = keys.filter(k => {
-      const r = ouroGet(k, null);
+      const r = recs[k];
       return r.resultado === 'PENDENTE' || !r.conferencia ||
         ouroPrecisaAuditoria(r);
     });
-    const ids = Array.from(new Set(query.map(k => ouroGet(k, null).fixtureId)));
+    const ids = Array.from(new Set(query.map(k => recs[k].fixtureId)));
     const finalCache = {};
     for (let i = 0; i < ids.length; i += 20) {
       let rows;
@@ -1118,7 +1266,7 @@ function conferirResultadosPendentes() {
       catch (e) { console.log('CONFERENCIA: ' + e.message); break; }
       const map = {}; rows.forEach(j => { map[j.fixture.id] = j; });
       query.forEach(k => {
-        const r = ouroGet(k, null), j = r && map[r.fixtureId];
+        const r = recs[k], j = r && map[r.fixtureId];
         if (!j) return;
         if (r.resultado === 'PENDENTE') {
           const result = ouroLiquidar(r, j);
@@ -1155,21 +1303,23 @@ function conferirResultadosPendentes() {
       });
     }
     const result = {consultados: keys.length, concluidos: done, auditorias, avisos,
-      pendentes: ouroTodosRegistros().filter(k => {
-        const r = ouroGet(k, null); return r && r.resultado === 'PENDENTE';
-      }).length};
+      naoEnviadosLimpos: limpos,
+      pendentes: Object.keys(recs).filter(k => recs[k] &&
+        recs[k].enviado !== false && recs[k].resultado === 'PENDENTE').length};
     result.observacoes = ouroConferirObservacoes();
     console.log(JSON.stringify(result)); return result;
   });
-  if (out && ouroRegistros().length >= 145) {
-    try { arquivarResultadosConcluidos(); }
+  const cheio = out && ouroTamanhoProps() > OURO.PROPS_LIMITE_ARQUIVO;
+  if (out && (cheio || ouroTodosRegistros().length >= OURO.ARQUIVAR_A_PARTIR)) {
+    // Lotes grandes evitam criar um arquivo pequeno no Drive a cada 10 min.
+    try { arquivarResultadosConcluidos(cheio ? 1 : OURO.ARQUIVAR_LOTE_MIN); }
     catch (e) { console.log('ARQUIVO_AUTOMATICO: ' + e.message); }
   }
   return out;
 }
 function diagnosticoScanner() {
   const d = ouroGet('OURO10_DIAG', null);
-  console.log(JSON.stringify(d || {erro: 'Ainda não há varredura V10.8'}, null, 2));
+  console.log(JSON.stringify(d || {erro: 'Ainda não há varredura V10.9'}, null, 2));
   return d;
 }
 function ouroDiaEnvio(r) {
@@ -1231,8 +1381,11 @@ function ouroRelatorioDia(day, all) {
     const parts = group.split('|');
     return ouroResumoAprendizado(parts[0], parts[1]);
   });
+  const clvs = sinais.map(r => ouroN(r.clv)).filter(x => x !== null);
   return {dia: day, total: sinais.length, count, mercados, aprendizado,
     auditoriasPendentes: needsAudit,
+    clvMedio: clvs.length ? ouroPct(clvs.reduce((a, b) => a + b, 0) / clvs.length) : 'ND',
+    clvAmostra: clvs.length,
     taxaGreen: count.GREEN + count.RED ?
       ouroPct(count.GREEN / (count.GREEN + count.RED)) : 'ND',
     roiBackTeorico: units ? ouroPct(profit / units) : 'ND',
@@ -1264,6 +1417,8 @@ function ouroPaginasDia(report, partial) {
     c.REVISAO + ' revisão | ' + c.PENDENTE + ' pendentes\n' +
     'Taxa Green ' + report.taxaGreen + ' (sem devoluções) | ROI Back teórico ' +
     report.roiBackTeorico + ' (1u/sinal)\n' +
+    'CLV médio pré-jogo: ' + report.clvMedio + ' (' + report.clvAmostra +
+    ' sinais; positivo = bateu a odd de fechamento)\n' +
     'Auditorias ainda pendentes: ' + report.auditoriasPendentes + '\n' +
     'Calibração ativa: ' + report.aprendizado.filter(x => x.status === 'ATIVO').length +
     '/' + report.aprendizado.length + ' grupos (detalhes no relatório)';
@@ -1386,15 +1541,19 @@ function resumoResultados() {
   count.arquivosIndisponiveis = arquivosIndisponiveis;
   console.log(JSON.stringify(count)); return count;
 }
-function arquivarResultadosConcluidos() {
+function arquivarResultadosConcluidos(minimo) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) throw Error('SCANNER_OCUPADO');
+  if (!lock.tryLock(30000)) throw Error('SCANNER_OCUPADO');
   try {
-    const done = ouroRegistros().map(k => ({key: k, r: ouroGet(k, null)}))
+    // Registros legados (OV9_S_) só precisam estar concluídos.
+    const done = ouroTodosRegistros().map(k => ({key: k, r: ouroGet(k, null)}))
       .filter(x => x.r && ['GREEN', 'RED', 'DEVOLVIDA', 'REVISAO']
-        .includes(x.r.resultado) && x.r.enviado && x.r.notificado &&
-        (x.r.auditoriaFinal || !ouroPrecisaAuditoria(x.r)));
-    if (!done.length) { console.log('Nenhum resultado V10 para arquivar.'); return 0; }
+        .includes(x.r.resultado) && (/^OV9_S_/.test(x.key) ||
+        (x.r.enviado && x.r.notificado &&
+        (x.r.auditoriaFinal || !ouroPrecisaAuditoria(x.r)))));
+    if (!done.length || done.length < (minimo || 1)) {
+      console.log('Resultados para arquivar: ' + done.length); return 0;
+    }
     const content = JSON.stringify(done.map(x => x.r));
     const file = DriveApp.createFile('scanner_ouro_v10_' + Date.now() + '.json',
       content, 'application/json');
@@ -1408,7 +1567,7 @@ function arquivarResultadosConcluidos() {
 function testarConexoes() {
   return ouroRodada('test', () => {
     const status = ouroApi('/status', 0, 0, 1);
-    ouroTelegram('SCANNER OURO V10.8\nAPI: OK\nTelegram: OK\nConsumo: ' +
+    ouroTelegram('SCANNER OURO V10.9\nAPI: OK\nTelegram: OK\nConsumo: ' +
       JSON.stringify(status.requests || 'ND'));
     return {api: 'OK', telegram: 'OK', requests: status.requests || null};
   });
@@ -1435,10 +1594,10 @@ function instalarScannerOver() {
   ScriptApp.newTrigger('rodarScannerOver').timeBased().everyMinutes(5).create();
   ScriptApp.newTrigger('conferirResultadosPendentes').timeBased().everyMinutes(10).create();
   ScriptApp.newTrigger('conferenciaFinalDoDia').timeBased().everyHours(1).create();
-  ouroTelegram('SCANNER OURO V10.8 INSTALADO\nVarredura: ~5 min; resultado: ~10 min.' +
+  ouroTelegram('SCANNER OURO V10.9 INSTALADO\nVarredura: ~5 min; resultado: ~10 min.' +
     '\nFechamento diário: ~1 h após o dia terminar e os sinais concluírem.' +
     '\nAlertas simulados; não aposta automaticamente.');
-  console.log('SCANNER OURO V10.8 INSTALADO');
+  console.log('SCANNER OURO V10.9 INSTALADO');
 }
 function rodarScanner12G() { return rodarScannerOver(); }
 function instalarScanner12G() { return instalarScannerOver(); }
