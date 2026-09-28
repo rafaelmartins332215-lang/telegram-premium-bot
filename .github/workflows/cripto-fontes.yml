@@ -4,7 +4,7 @@ name: Fontes de preço do Scanner Cripto
 on:
   push:
     paths: ['apps-script-cripto/Code.gs', 'apps-script-cripto/tests/fontes_reais.js',
-            '.github/workflows/cripto-fontes.yml']
+            'apps-script-cripto/tests/e2e_real.js', '.github/workflows/cripto-fontes.yml']
   workflow_dispatch:
 jobs:
   fontes:
@@ -15,3 +15,5 @@ jobs:
         with:
           node-version: 22
       - run: node apps-script-cripto/tests/fontes_reais.js
+      - name: Teste de ponta a ponta com dados reais
+        run: node apps-script-cripto/tests/e2e_real.js
