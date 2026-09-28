@@ -25,7 +25,7 @@ function http(url) {
 }
 function resp(r) { return {getResponseCode: () => r.code, getContentText: () => r.body}; }
 
-const props = {};
+const props = {CRIPTO_TELEGRAM_TOKEN: 'teste', CRIPTO_TELEGRAM_CHAT_ID: '1'};  // Telegram só capturado
 const enviados = [];
 const gatilhos = [];
 const ctx = {
