@@ -32,6 +32,10 @@ jobs:
         run: |
           python backtest/pro_backtest.py --saida relatorio_pro.md
           cat relatorio_pro.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Rodada focada
+        run: |
+          python backtest/foco_backtest.py --saida relatorio_foco.md
+          cat relatorio_foco.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: backtest-cripto
