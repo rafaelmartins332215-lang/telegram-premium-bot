@@ -1,5 +1,5 @@
 /**
- * SCANNER CRIPTO V1 — Google Apps Script, arquivo único.
+ * SCANNER CRIPTO V1.1 — Google Apps Script, arquivo único.
  * Estratégia validada no backtest (backtest/): rompimento com volume em 4h,
  * só compra, com filtro do BTC acima da EMA200 diária.
  *
@@ -19,7 +19,7 @@ const CRIPTO = {
   get TELEGRAM_TOKEN() { return criptoCred('CRIPTO_TELEGRAM_TOKEN'); },
   get TELEGRAM_CHAT_ID() { return criptoCred('CRIPTO_TELEGRAM_CHAT_ID'); },
   get BANCA_INICIAL() { return Number(criptoCred('CRIPTO_BANCA')) || 50; },
-  MODELO: 'SCANNER-CRIPTO-V1',
+  MODELO: 'SCANNER-CRIPTO-V1.1',
   MOEDAS: ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LINK', 'DOT',
     'LTC', 'TRX', 'NEAR', 'SUI', 'APT', 'ATOM', 'UNI', 'AAVE', 'FIL', 'INJ',
     'OP', 'ARB', 'SHIB', 'PEPE', 'WIF', 'TIA', 'SEI', 'RUNE', 'FET', 'STX',
@@ -31,9 +31,11 @@ const CRIPTO = {
   // Gestão para banca pequena
   RISCO: 0.01, MAX_POSICOES: 6, ORDEM_MIN: 5, ALAVANCAGEM: 2,
   CUSTO_IDA_VOLTA: 0.0012,
-  // Propriedades do script aceitam no máximo 9 KB por valor: guardamos só as
-  // últimas operações; os totais ficam em st.stats.
-  LOTE: 20, HISTORICO_MAX: 25, ERRO_ALERTA: 3, HORA_RESUMO: 21, ATRASO_MAX_MS: 3600 * 1000,
+  LOTE: 20, ERRO_ALERTA: 3, HORA_RESUMO: 21, ATRASO_MAX_MS: 3600 * 1000,
+  // Histórico em blocos: cada propriedade aceita no máximo 9 KB.
+  HIST_BLOCO: 8000,
+  // Referência do backtest (4h, volume 2x, alvo 2R, futuros, 40 moedas)
+  REF_ACERTO: 0.42, REF_MEDIA_R: 0.22, AMOSTRA_MIN: 30,
   GATILHOS: ['rodarScannerCripto', 'resumoDiarioCripto']
 };
 
@@ -46,17 +48,52 @@ function criptoGet(k, padrao) {
 }
 function criptoSet(k, v) { criptoProps().setProperty(k, JSON.stringify(v)); }
 function criptoEstado() {
-  return criptoGet('CRIPTO_ESTADO', null) || {
-    banca: CRIPTO.BANCA_INICIAL, abertas: [], fechadas: [], ultimoCandle: 0,
-    stats: {n: 0, ganhos: 0, somaR: 0, lucro: 0},
-    regime: null, erros: 0, inicio: Date.now()
+  const st = criptoGet('CRIPTO_ESTADO', null) || {
+    banca: CRIPTO.BANCA_INICIAL, abertas: [], ultimoCandle: 0, regime: null, erros: 0,
+    inicio: Date.now()
   };
-}
-function criptoSalvar(st) {
-  if (st.fechadas.length > CRIPTO.HISTORICO_MAX) {
-    st.fechadas = st.fechadas.slice(-CRIPTO.HISTORICO_MAX);
+  const s = st.stats = Object.assign({n: 0, ganhos: 0, somaR: 0, lucro: 0, pico: st.banca,
+    ddMax: 0, seqPerda: 0, maxSeqPerda: 0, sinais: 0, ignorados: 0}, st.stats || {});
+  if (!s.pico) s.pico = st.banca;
+  if (Array.isArray(st.fechadas)) {  // versão 1.0 guardava as últimas operações no estado
+    st.fechadas.forEach(f => criptoHistAdd({par: f.par, ab: f.abertura || f.fim,
+      fe: f.fechamento || f.fim, tipo: f.tipo, R: f.R, lucro: f.lucro}));
+    delete st.fechadas;
+    criptoSalvar(st);
   }
-  criptoSet('CRIPTO_ESTADO', st);
+  return st;
+}
+function criptoSalvar(st) { criptoSet('CRIPTO_ESTADO', st); }
+
+// ------------------------------------------------------------ histórico completo
+// Cada operação: [par, abertura, fechamento, tipo, R, lucro, entrada, saída, valor]
+function criptoHistAdd(o) {
+  const n = criptoGet('CRIPTO_HIST_N', 0);
+  const k = Math.max(n - 1, 0);
+  const bloco = n ? criptoGet('CRIPTO_HIST_' + k, []) : [];
+  const linha = [o.par.replace(/USDT$/, ''), o.ab, o.fe, String(o.tipo || '?')[0],
+    Number((o.R || 0).toFixed(3)), Number((o.lucro || 0).toFixed(4)),
+    o.ent || 0, o.sai || 0, Number((o.valor || 0).toFixed(2))];
+  bloco.push(linha);
+  if (JSON.stringify(bloco).length > CRIPTO.HIST_BLOCO && bloco.length > 1) {
+    criptoSet('CRIPTO_HIST_' + k, bloco.slice(0, -1));
+    criptoSet('CRIPTO_HIST_' + (k + 1), [linha]);
+    criptoSet('CRIPTO_HIST_N', k + 2);
+  } else {
+    criptoSet('CRIPTO_HIST_' + k, bloco);
+    criptoSet('CRIPTO_HIST_N', k + 1);
+  }
+}
+function criptoHist() {
+  const n = criptoGet('CRIPTO_HIST_N', 0);
+  const tipos = {A: 'ALVO', S: 'STOP', P: 'PRAZO'};
+  let out = [];
+  for (let k = 0; k < n; k++) {
+    out = out.concat(criptoGet('CRIPTO_HIST_' + k, []).map(x => ({
+      par: x[0], ab: x[1], fe: x[2], tipo: tipos[x[3]] || x[3], R: x[4], lucro: x[5],
+      ent: x[6], sai: x[7], valor: x[8]})));
+  }
+  return out;
 }
 
 // ------------------------------------------------------------ utilidades
@@ -281,6 +318,7 @@ function criptoVarrer(st, agora, ultimoFechado) {
     if (!s.ok) return;
     const motivo = criptoAbrir(st, par, s, cs[cs.length - 1], agora);
     (motivo ? diag.ignorados : diag.sinais).push(par + (motivo ? ': ' + motivo : ''));
+    if (motivo && motivo !== 'já posicionado') st.stats.ignorados++;
   });
   criptoSet('CRIPTO_DIAG', diag);
 }
@@ -302,6 +340,7 @@ function criptoAbrir(st, par, s, candleEmCurso, agora) {
   const pos = {par: par, entrada: entrada, stop: stop, alvo: alvo, qtd: qtd, valor: valor,
     riscoUsd: riscoUsd, abertura: agora, candle: s.candle};
   st.abertas.push(pos);
+  st.stats.sinais++;
   criptoTelegram('🚀 SINAL DE COMPRA (SIMULADO)\n' + par + ' | rompimento 4h com volume\n' +
     '\nEntrada: ' + criptoPreco(entrada) +
     '\nStop: ' + criptoPreco(stop) + ' (' + criptoPct(stop / entrada - 1) + ')' +
@@ -311,7 +350,8 @@ function criptoAbrir(st, par, s, candleEmCurso, agora) {
     '\nMargem (' + CRIPTO.ALAVANCAGEM + 'x, isolada): ' + criptoUsd(valor / CRIPTO.ALAVANCAGEM) +
     '\nRisco: ' + criptoUsd(riscoUsd) + ' (' + (100 * CRIPTO.RISCO) + '% da banca)' +
     '\nVolume ' + (s.volume / s.volMedia).toFixed(1) + 'x a média' +
-    '\nPosições abertas: ' + st.abertas.length + '/' + CRIPTO.MAX_POSICOES);
+    '\nPosições abertas: ' + st.abertas.length + '/' + CRIPTO.MAX_POSICOES +
+    '\n\nGráfico: https://www.tradingview.com/chart/?symbol=MEXC:' + par);
   return '';
 }
 
@@ -351,41 +391,203 @@ function criptoFechar(st, p, r, agora) {
   const custo = CRIPTO.CUSTO_IDA_VOLTA * p.valor;
   const lucro = R * p.riscoUsd - custo;
   st.banca += lucro;
-  st.fechadas.push({par: p.par, fim: r.quando, tipo: r.tipo, R: Number(R.toFixed(3)),
-    lucro: Number(lucro.toFixed(4))});
-  st.stats.n++;
-  if (lucro > 0) st.stats.ganhos++;
-  st.stats.somaR += R;
-  st.stats.lucro += lucro;
+  criptoHistAdd({par: p.par, ab: p.abertura, fe: r.quando, tipo: r.tipo, R: R, lucro: lucro,
+    ent: p.entrada, sai: r.preco, valor: p.valor});
+  const s = st.stats;
+  s.n++;
+  if (lucro > 0) { s.ganhos++; s.seqPerda = 0; } else {
+    s.seqPerda++;
+    s.maxSeqPerda = Math.max(s.maxSeqPerda, s.seqPerda);
+  }
+  s.somaR += R;
+  s.lucro += lucro;
+  s.pico = Math.max(s.pico, st.banca);
+  s.ddMax = Math.max(s.ddMax, 1 - st.banca / s.pico);
   const icone = {ALVO: '✅', STOP: '❌', PRAZO: '⏱'}[r.tipo];
   criptoTelegram(icone + ' ' + r.tipo + ' (SIMULADO) ' + p.par +
     '\nEntrada ' + criptoPreco(p.entrada) + ' → saída ' + criptoPreco(r.preco) +
     ' (' + criptoPct(r.preco / p.entrada - 1) + ')' +
     '\nResultado: ' + (R >= 0 ? '+' : '') + R.toFixed(2) + 'R = ' + criptoUsd(lucro) +
     ' (já com taxas)' +
-    '\nBanca simulada: ' + criptoUsd(st.banca) +
-    '\nAberta em ' + criptoData(p.abertura) + ', fechada em ' + criptoData(r.quando));
+    '\nBanca simulada: ' + criptoUsd(st.banca) + ' (' +
+    criptoPct(st.banca / CRIPTO.BANCA_INICIAL - 1) + ' desde o início)' +
+    '\nDuração: ' + criptoDuracao(r.quando - p.abertura) +
+    ' | aberta ' + criptoData(p.abertura) + ', fechada ' + criptoData(r.quando) +
+    '\nPlacar: ' + s.ganhos + ' ganhos / ' + (s.n - s.ganhos) + ' perdas (' +
+    (100 * s.ganhos / s.n).toFixed(0) + '%)');
 }
 
 // ------------------------------------------------------------ relatórios
-function criptoTextoResumo(st) {
-  const s = st.stats;
-  return 'RESUMO SCANNER CRIPTO (SIMULADO)' +
-    '\nBanca: ' + criptoUsd(st.banca) + ' (início ' + criptoUsd(CRIPTO.BANCA_INICIAL) + ', ' +
-    criptoPct(st.banca / CRIPTO.BANCA_INICIAL - 1) + ')' +
-    '\nOperações fechadas: ' + s.n + (s.n ? ' | acerto ' +
-      (100 * s.ganhos / s.n).toFixed(0) + '% | média ' + (s.somaR / s.n).toFixed(2) + 'R' : '') +
-    '\nResultado total: ' + criptoUsd(s.lucro) +
-    '\nFiltro BTC: ' + (st.regime === null ? 'ainda não lido' : st.regime ? 'ligado 🟢' : 'em espera 🔴') +
-    '\nAbertas (' + st.abertas.length + '): ' +
-    (st.abertas.map(p => p.par + ' @ ' + criptoPreco(p.entrada)).join(', ') || 'nenhuma');
+function criptoDuracao(ms) {
+  const h = ms / 3600000;
+  return h < 48 ? h.toFixed(0) + 'h' : (h / 24).toFixed(1) + ' dias';
 }
-function resumoDiarioCripto() { criptoTelegram(criptoTextoResumo(criptoEstado())); }
+function criptoDia(ms, fmt) {
+  return Utilities.formatDate(new Date(ms), 'America/Sao_Paulo', fmt || 'yyyy-MM-dd');
+}
+
+/** Métricas profissionais de uma lista de operações fechadas. */
+function criptoMetricas(lista) {
+  const n = lista.length;
+  const m = {n: n, ganhos: 0, lucro: 0, somaR: 0, bruto: 0, perdaBruta: 0, dur: 0,
+    tipos: {ALVO: 0, STOP: 0, PRAZO: 0}, moedas: {}, melhor: null, pior: null, ddUsd: 0};
+  let acum = 0, pico = 0;
+  lista.slice().sort((x, y) => x.fe - y.fe).forEach(o => {
+    if (o.lucro > 0) { m.ganhos++; m.bruto += o.lucro; } else m.perdaBruta -= o.lucro;
+    m.lucro += o.lucro;
+    m.somaR += o.R;
+    m.dur += (o.fe - o.ab);
+    m.tipos[o.tipo] = (m.tipos[o.tipo] || 0) + 1;
+    const c = m.moedas[o.par] = m.moedas[o.par] || {n: 0, lucro: 0};
+    c.n++;
+    c.lucro += o.lucro;
+    if (!m.melhor || o.R > m.melhor.R) m.melhor = o;
+    if (!m.pior || o.R < m.pior.R) m.pior = o;
+    acum += o.lucro;
+    pico = Math.max(pico, acum);
+    m.ddUsd = Math.max(m.ddUsd, pico - acum);
+  });
+  m.acerto = n ? m.ganhos / n : 0;
+  m.mediaR = n ? m.somaR / n : 0;
+  const varR = n > 1 ? lista.reduce((a, o) => a + (o.R - m.mediaR) * (o.R - m.mediaR), 0) / (n - 1) : 0;
+  m.erroR = n > 1 ? Math.sqrt(varR / n) : 0;
+  m.pf = m.perdaBruta > 0 ? m.bruto / m.perdaBruta : (m.bruto > 0 ? Infinity : 0);
+  m.durMedia = n ? m.dur / n : 0;
+  return m;
+}
+
+function criptoVeredito(m) {
+  if (m.n < CRIPTO.AMOSTRA_MIN) {
+    return '⏳ Amostra pequena (' + m.n + ' de ' + CRIPTO.AMOSTRA_MIN +
+      ' operações). Ainda não dá para concluir; continue no simulado.';
+  }
+  const z = m.erroR > 0 ? (m.mediaR - CRIPTO.REF_MEDIA_R) / m.erroR : 0;
+  if (m.mediaR > 0 && z > -2) return '✅ Dentro do esperado pelo backtest.';
+  if (z < -2 && m.mediaR <= 0) {
+    return '❌ Abaixo do backtest com significância estatística. Não passar para dinheiro real.';
+  }
+  return '⚠️ Inconclusivo: resultado abaixo da referência, mas dentro da margem de erro. Acompanhar.';
+}
+
+function criptoBlocoMetricas(m) {
+  if (!m.n) return 'Nenhuma operação fechada no período.';
+  const ord = Object.keys(m.moedas).map(k => [k, m.moedas[k]]).sort((a, b) => b[1].lucro - a[1].lucro);
+  const fmtM = x => x[0] + ' ' + criptoUsd(x[1].lucro) + ' (' + x[1].n + ')';
+  return 'Operações: ' + m.n + ' | acerto ' + (100 * m.acerto).toFixed(0) + '%' +
+    '\nResultado: ' + criptoUsd(m.lucro) +
+    '\nMédia por operação: ' + (m.mediaR >= 0 ? '+' : '') + m.mediaR.toFixed(2) + 'R' +
+    (m.n > 1 ? ' (± ' + m.erroR.toFixed(2) + ')' : '') +
+    '\nProfit factor: ' + (Number.isFinite(m.pf) ? m.pf.toFixed(2) : '∞') +
+    '\nMelhor: ' + m.melhor.par + ' ' + (m.melhor.R >= 0 ? '+' : '') + m.melhor.R.toFixed(2) + 'R' +
+    ' | pior: ' + m.pior.par + ' ' + m.pior.R.toFixed(2) + 'R' +
+    '\nSaídas: ✅ alvo ' + (m.tipos.ALVO || 0) + ' | ❌ stop ' + (m.tipos.STOP || 0) +
+    ' | ⏱ prazo ' + (m.tipos.PRAZO || 0) +
+    '\nDuração média: ' + criptoDuracao(m.durMedia) +
+    '\nQueda máxima: ' + criptoUsd(m.ddUsd) +
+    '\nMelhores moedas: ' + ord.slice(0, 3).map(fmtM).join(', ') +
+    (ord.length > 3 ? '\nPiores moedas: ' +
+      ord.slice(Math.max(3, ord.length - 3)).reverse().map(fmtM).join(', ') : '');
+}
+
+/** Preço atual das posições abertas (último candle de 15 min). */
+function criptoPrecosAtuais(st) {
+  if (!st.abertas.length) return [];
+  const d = criptoApiVarios(st.abertas.map(p => criptoPedido(p.par, '15m', 2)));
+  return d.map(x => (Array.isArray(x) && x.length ? Number(x[x.length - 1][4]) : NaN));
+}
+
+function criptoBlocoAbertas(st) {
+  if (!st.abertas.length) return 'Posições abertas: nenhuma';
+  const precos = criptoPrecosAtuais(st);
+  let total = 0, exp = 0;
+  const linhas = st.abertas.map((p, i) => {
+    const px = precos[i];
+    const R = (px - p.entrada) / (p.entrada - p.stop);
+    const usd = Number.isFinite(R) ? R * p.riscoUsd : 0;
+    total += usd;
+    exp += p.valor;
+    const atual = Number.isFinite(R) ? criptoPreco(px) + ' (' + criptoPct(px / p.entrada - 1) +
+      ') ' + (R >= 0 ? '+' : '') + R.toFixed(2) + 'R ' + criptoUsd(usd) : 'preço indisponível';
+    return '• ' + p.par + ': ' + criptoPreco(p.entrada) + ' → ' + atual +
+      '\n   stop ' + criptoPreco(p.stop) + ' | alvo ' + criptoPreco(p.alvo) +
+      ' | há ' + criptoDuracao(Date.now() - p.abertura);
+  });
+  return 'Posições abertas (' + st.abertas.length + '/' + CRIPTO.MAX_POSICOES + '):\n' +
+    linhas.join('\n') + '\nNão realizado: ' + criptoUsd(total) + ' | exposição ' + criptoUsd(exp) +
+    ' | margem ' + criptoUsd(exp / CRIPTO.ALAVANCAGEM);
+}
+
+function criptoCabecalho(st) {
+  return 'Banca: ' + criptoUsd(st.banca) + ' (início ' + criptoUsd(CRIPTO.BANCA_INICIAL) + ', ' +
+    criptoPct(st.banca / CRIPTO.BANCA_INICIAL - 1) + ')' +
+    '\nFiltro BTC: ' + (st.regime === null ? 'ainda não lido' :
+      st.regime ? 'ligado 🟢 (procurando compras)' : 'em espera 🔴 (sem novas compras)');
+}
+
+function criptoTextoDiario(st, agora) {
+  const hoje = criptoDia(agora);
+  const hist = criptoHist();
+  const doDia = hist.filter(o => criptoDia(o.fe) === hoje);
+  const abertasHoje = hist.filter(o => criptoDia(o.ab) === hoje).length +
+    st.abertas.filter(p => criptoDia(p.abertura) === hoje).length;
+  const lucroDia = doDia.reduce((a, o) => a + o.lucro, 0);
+  return '📊 RELATÓRIO DIÁRIO — ' + criptoDia(agora, 'dd/MM/yyyy') + ' (SIMULADO)\n' +
+    '\n' + criptoCabecalho(st) +
+    '\nResultado do dia: ' + criptoUsd(lucroDia) + ' | sinais hoje: ' + abertasHoje +
+    '\n\nFechadas hoje (' + doDia.length + '):' +
+    (doDia.length ? '\n' + doDia.map(o => '• ' + o.par + ' ' + o.tipo + ' ' +
+      (o.R >= 0 ? '+' : '') + o.R.toFixed(2) + 'R ' + criptoUsd(o.lucro)).join('\n') : ' nenhuma') +
+    '\n\n' + criptoBlocoAbertas(st);
+}
+
+function criptoTextoPeriodo(titulo, desde, st, agora) {
+  const hist = criptoHist();
+  const per = hist.filter(o => o.fe >= desde);
+  const mp = criptoMetricas(per);
+  const mt = criptoMetricas(hist);
+  const s = st.stats;
+  const dias = Math.max(1, (agora - st.inicio) / 86400000);
+  return titulo + ' (SIMULADO)\n\n' + criptoCabecalho(st) +
+    '\n\n— NO PERÍODO —\n' + criptoBlocoMetricas(mp) +
+    '\n\n— DESDE O INÍCIO (' + dias.toFixed(0) + (dias < 1.5 ? ' dia' : ' dias') + ') —\n' + criptoBlocoMetricas(mt) +
+    '\n\n— RISCO —' +
+    '\nQueda máxima da banca: ' + (100 * s.ddMax).toFixed(1) + '%' +
+    '\nSequência de perdas: atual ' + s.seqPerda + ' | máxima ' + s.maxSeqPerda +
+    '\n\n— COMPARAÇÃO COM O BACKTEST —' +
+    '\nAcerto: ' + (100 * mt.acerto).toFixed(0) + '% (backtest ~' + (100 * CRIPTO.REF_ACERTO).toFixed(0) + '%)' +
+    '\nMédia: ' + (mt.mediaR >= 0 ? '+' : '') + mt.mediaR.toFixed(2) + 'R (backtest ~+' +
+    CRIPTO.REF_MEDIA_R.toFixed(2) + 'R)' +
+    '\n' + criptoVeredito(mt) +
+    '\n\n— OPERACIONAL —' +
+    '\nSinais abertos: ' + s.sinais + ' | ignorados por limite/margem: ' + s.ignorados +
+    '\nFonte de preços: ' + criptoGet('CRIPTO_FONTE', '?') +
+    '\n\n' + criptoBlocoAbertas(st);
+}
+
+/** Acionador diário (21h): relatório do dia; aos domingos o semanal; dia 1 o mensal. */
+function resumoDiarioCripto() {
+  const st = criptoEstado();
+  const agora = Date.now();
+  criptoTelegram(criptoTextoDiario(st, agora));
+  if (criptoDia(agora, 'u') === '7') {
+    criptoTelegram(criptoTextoPeriodo('📈 RELATÓRIO SEMANAL — ' + criptoDia(agora, 'dd/MM/yyyy'),
+      agora - 7 * 86400000, st, agora));
+  }
+  if (criptoDia(agora, 'd') === '1') {
+    const d = new Date(agora - 86400000);
+    const inicioMes = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    criptoTelegram(criptoTextoPeriodo('🗓 RELATÓRIO MENSAL — ' + criptoDia(agora - 86400000, 'MM/yyyy'),
+      inicioMes, st, agora));
+  }
+}
+/** Relatório completo na hora (rode pelo editor). */
 function resumoCripto() {
-  const txt = criptoTextoResumo(criptoEstado());
+  const st = criptoEstado();
+  const txt = criptoTextoPeriodo('📋 RELATÓRIO COMPLETO', st.inicio, st, Date.now());
   console.log(txt);
   criptoTelegram(txt);
 }
+function relatorioDiarioCripto() { criptoTelegram(criptoTextoDiario(criptoEstado(), Date.now())); }
 function diagnosticoCripto() {
   console.log(JSON.stringify(criptoGet('CRIPTO_DIAG', {}), null, 2));
 }
@@ -430,16 +632,20 @@ function instalarScannerCripto() {
     .atHour(CRIPTO.HORA_RESUMO).create();
   const st = criptoEstado();
   criptoSalvar(st);
-  criptoTelegram('SCANNER CRIPTO V1 INSTALADO (MODO SIMULADO)\n' +
+  criptoTelegram('SCANNER CRIPTO V1.1 INSTALADO (MODO SIMULADO)\n' +
     'Estratégia: rompimento 4h com volume + filtro BTC\n' +
     CRIPTO.MOEDAS.length + ' moedas | risco ' + (100 * CRIPTO.RISCO) + '% por trade | máx. ' +
     CRIPTO.MAX_POSICOES + ' posições\nBanca simulada: ' + criptoUsd(st.banca) +
     '\nVarre a cada 15 min; sinais só no fechamento dos candles de 4h ' +
-    '(21h, 1h, 5h, 9h, 13h e 17h de Brasília).\nNão envia ordens para a corretora.');
+    '(21h, 1h, 5h, 9h, 13h e 17h de Brasília).\nRelatórios: diário às 21h, semanal no domingo, ' +
+    'mensal no dia 1.\nNão envia ordens para a corretora.');
   rodarScannerCripto();
 }
 
 function zerarSimulacaoCripto() {
+  const n = criptoGet('CRIPTO_HIST_N', 0);
+  for (let k = 0; k < n; k++) criptoProps().deleteProperty('CRIPTO_HIST_' + k);
+  criptoProps().deleteProperty('CRIPTO_HIST_N');
   criptoProps().deleteProperty('CRIPTO_ESTADO');
   criptoProps().deleteProperty('CRIPTO_DIAG');
   criptoProps().deleteProperty('CRIPTO_FONTE');

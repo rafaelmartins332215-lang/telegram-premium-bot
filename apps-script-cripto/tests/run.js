@@ -11,6 +11,17 @@ const H4 = 4 * 3600 * 1000;
 const DIA = 24 * 3600 * 1000;
 const M15 = 15 * 60 * 1000;
 
+/** Utilities.formatDate simplificado, fuso de Brasília (UTC-3). */
+function formatar(d, tz, fmt) {
+  const x = new Date(d.getTime() - 3 * 3600000);
+  const p = n => String(n).padStart(2, '0');
+  const dow = x.getUTCDay() || 7;
+  return fmt.replace('yyyy', x.getUTCFullYear()).replace('MM', p(x.getUTCMonth() + 1))
+    .replace('dd', p(x.getUTCDate())).replace('HH', p(x.getUTCHours()))
+    .replace('mm', p(x.getUTCMinutes())).replace(/^u$/, String(dow))
+    .replace(/^d$/, String(x.getUTCDate()));
+}
+
 function carregar(opts) {
   const props = Object.assign({CRIPTO_TELEGRAM_TOKEN: 't', CRIPTO_TELEGRAM_CHAT_ID: '1'},
     opts.props || {});
@@ -36,7 +47,7 @@ function carregar(opts) {
       deleteProperty: k => { delete props[k]; }
     })},
     LockService: {getScriptLock: () => ({tryLock: () => true, releaseLock: () => {}})},
-    Utilities: {sleep: () => {}, formatDate: d => new Date(d).toISOString()},
+    Utilities: {sleep: () => {}, formatDate: formatar},
     ScriptApp: {
       getProjectTriggers: () => gatilhos.slice(),
       deleteTrigger: t => { gatilhos.splice(gatilhos.indexOf(t), 1); },
@@ -101,8 +112,8 @@ function velasDia(agora, alta) {
 }
 
 function cenario(o) {
-  const candleAtual = Math.floor(Date.UTC(2026, 8, 28, 12) / H4) * H4;
-  const agora = candleAtual + (o.minutos || 10) * 60000;
+  const candleAtual = Math.floor((o.agora || Date.UTC(2026, 8, 28, 12)) / H4) * H4;
+  const agora = o.agora || candleAtual + (o.minutos || 10) * 60000;
   const quinze = o.quinze || (() => []);
   const bloqueados = o.bloqueados || [];
   return carregar({
@@ -194,8 +205,12 @@ teste('bate o alvo: fecha com +2R menos taxa e atualiza a banca', () => {
   b2.ctx.rodarScannerCripto();
   const st = b2.estado();
   assert.strictEqual(st.abertas.length, 0);
-  assert.strictEqual(st.fechadas[0].tipo, 'ALVO');
-  assert.ok(Math.abs(st.fechadas[0].R - 2) < 1e-6);
+  const h = b2.ctx.criptoHist();
+  assert.strictEqual(h.length, 1);
+  assert.strictEqual(h[0].tipo, 'ALVO');
+  assert.strictEqual(h[0].par, 'SOL');
+  assert.ok(Math.abs(h[0].R - 2) < 1e-6);
+  assert.strictEqual(st.stats.seqPerda, 0);
   assert.ok(Math.abs(st.banca - (50 + 1 - 0.0012 * p.valor)) < 1e-6);
   assert.ok(b2.enviados.some(m => m.includes('ALVO')));
 });
@@ -208,8 +223,10 @@ teste('stop e alvo no mesmo candle: conta stop', () => {
     quinze: (sym, ini) => [kline(Math.floor(ini / M15) * M15 + M15, p.entrada, p.alvo * 1.01,
       p.stop * 0.99, p.entrada, 1, M15)]});
   b2.ctx.rodarScannerCripto();
-  assert.strictEqual(b2.estado().fechadas[0].tipo, 'STOP');
+  assert.strictEqual(b2.ctx.criptoHist()[0].tipo, 'STOP');
   assert.ok(b2.estado().banca < 50);
+  assert.strictEqual(b2.estado().stats.seqPerda, 1);
+  assert.ok(b2.estado().stats.ddMax > 0);
 });
 
 const BINANCE = ['https://data-api.binance.vision', 'https://api.binance.com',
@@ -270,6 +287,87 @@ teste('estado continua abaixo de 9 KB depois de muitas operações', () => {
   }
   b.ctx.criptoSalvar(st);
   assert.strictEqual(b.estado().stats.n, 200);
+  assert.strictEqual(b.ctx.criptoHist().length, 200);
+  assert.ok(Number(b.props.CRIPTO_HIST_N) > 1, 'histórico dividido em blocos');
+  assert.strictEqual(b.estado().stats.maxSeqPerda, 200);
+});
+
+function comHistorico(o) {
+  const b = cenario(o || {});
+  const st = b.ctx.criptoEstado();
+  const base = Date.UTC(2026, 8, 20, 12);
+  const Rs = [2, -1, -1, 2, -1.02, 2, -1, 0.4];
+  Rs.forEach((R, i) => b.ctx.criptoFechar(st, {par: ['SOLUSDT', 'ETHUSDT', 'PEPEUSDT', 'ADAUSDT'][i % 4],
+    entrada: 100, stop: 95, valor: 10, riscoUsd: 0.5, abertura: base + i * 86400000},
+  {tipo: R === 2 ? 'ALVO' : R < 0 ? 'STOP' : 'PRAZO', preco: 100 + 5 * R,
+    quando: base + i * 86400000 + 5 * 3600000}, 0));
+  b.ctx.criptoSalvar(st);
+  return b;
+}
+
+teste('métricas: acerto, média R, profit factor e queda', () => {
+  const b = comHistorico();
+  const m = b.ctx.criptoMetricas(b.ctx.criptoHist());
+  assert.strictEqual(m.n, 8);
+  assert.strictEqual(m.ganhos, 4);
+  assert.ok(Math.abs(m.mediaR - (2 - 1 - 1 + 2 - 1.02 + 2 - 1 + 0.4) / 8) < 1e-9);
+  assert.ok(m.pf > 1 && m.ddUsd > 0);
+  assert.strictEqual(m.tipos.ALVO, 3);
+  assert.strictEqual(m.tipos.PRAZO, 1);
+});
+
+teste('veredito: amostra pequena pede paciência', () => {
+  const b = comHistorico();
+  assert.ok(b.ctx.criptoVeredito(b.ctx.criptoMetricas(b.ctx.criptoHist())).includes('Amostra pequena'));
+  const ruim = Array.from({length: 60}, () => ({R: -1, lucro: -0.5, ab: 0, fe: 1, tipo: 'STOP', par: 'X'}))
+    .concat([{R: 0.5, lucro: 0.2, ab: 0, fe: 1, tipo: 'PRAZO', par: 'X'}]);
+  assert.ok(b.ctx.criptoVeredito(b.ctx.criptoMetricas(ruim)).includes('Abaixo do backtest'));
+  const bom = Array.from({length: 60}, (_, i) => ({R: i % 5 < 2 ? 2 : -1, lucro: 0, ab: 0, fe: 1,
+    tipo: 'X', par: 'X'}));
+  assert.ok(b.ctx.criptoVeredito(b.ctx.criptoMetricas(bom)).includes('Dentro do esperado'));
+});
+
+teste('relatório diário: banca, fechadas do dia e posição aberta com resultado ao vivo', () => {
+  const b = cenario({rompem: ['SOLUSDT']});
+  b.ctx.rodarScannerCripto();
+  b.ctx.resumoDiarioCripto();
+  const msg = b.enviados.find(m => m.includes('RELATÓRIO DIÁRIO'));
+  assert.ok(msg.includes('Banca: US$ 50.00'));
+  assert.ok(msg.includes('Posições abertas (1/6)') && msg.includes('SOLUSDT'));
+  assert.ok(msg.includes('Não realizado'));
+  assert.ok(!b.enviados.some(m => m.includes('RELATÓRIO SEMANAL')), 'segunda-feira não tem semanal');
+});
+
+teste('domingo manda o semanal; dia 1 manda o mensal', () => {
+  const dom = cenario({agora: Date.UTC(2026, 9, 4, 23, 30)});  // domingo 04/10, 20h30 em Brasília
+  dom.ctx.resumoDiarioCripto();
+  assert.ok(dom.enviados.some(m => m.includes('RELATÓRIO SEMANAL')));
+  assert.ok(!dom.enviados.some(m => m.includes('RELATÓRIO MENSAL')));
+  const dia1 = cenario({agora: Date.UTC(2026, 9, 1, 23, 30)});  // quinta 01/10
+  dia1.ctx.resumoDiarioCripto();
+  assert.ok(dia1.enviados.some(m => m.includes('RELATÓRIO MENSAL — 09/2026')));
+});
+
+teste('relatório completo traz todas as seções', () => {
+  const b = comHistorico();
+  b.ctx.resumoCripto();
+  const msg = b.enviados.find(m => m.includes('RELATÓRIO COMPLETO'));
+  ['NO PERÍODO', 'DESDE O INÍCIO', 'RISCO', 'COMPARAÇÃO COM O BACKTEST', 'OPERACIONAL',
+    'Profit factor', 'Melhores moedas', 'Piores moedas', 'Sequência de perdas'].forEach(t =>
+    assert.ok(msg.includes(t), 'faltou ' + t));
+  assert.ok(msg.length < 4096, 'cabe numa mensagem do Telegram');
+});
+
+teste('migra o estado da versão 1.0 sem duplicar', () => {
+  const antigo = {banca: 51, abertas: [], ultimoCandle: 0, regime: true, erros: 0, inicio: 1,
+    fechadas: [{par: 'SOLUSDT', fim: 5, tipo: 'ALVO', R: 2, lucro: 1}],
+    stats: {n: 1, ganhos: 1, somaR: 2, lucro: 1}};
+  const b = cenario({props: {CRIPTO_ESTADO: JSON.stringify(antigo)}});
+  b.ctx.resumoDiarioCripto();
+  b.ctx.resumoDiarioCripto();
+  assert.strictEqual(b.ctx.criptoHist().length, 1);
+  assert.strictEqual(b.estado().fechadas, undefined);
+  assert.strictEqual(b.estado().stats.n, 1);
 });
 
 teste('indicadores: EMA e ATR iguais ao pandas (adjust=False / Wilder)', () => {

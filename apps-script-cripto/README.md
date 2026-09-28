@@ -1,4 +1,4 @@
-# Scanner Cripto V1 (Google Apps Script)
+# Scanner Cripto V1.1 (Google Apps Script)
 
 Robô de sinais da estratégia validada em `backtest/`: rompimento com volume em
 4h, só compra, com filtro do BTC acima da EMA200 diária. **Modo simulado**:
@@ -24,9 +24,21 @@ acionadores têm prefixo `cripto` e não tocam nos do Ouro.
 4. Rode `testarConexoesCripto()` e autorize o acesso.
 5. Rode `instalarScannerCripto()`.
 
+## Relatórios no Telegram
+
+- **Diário (21h):** banca, resultado do dia, operações fechadas e posições abertas
+  com preço atual, resultado não realizado, stop e alvo.
+- **Semanal (domingo):** métricas da semana e desde o início (acerto, média em R
+  com margem de erro, profit factor, melhores e piores moedas, tipos de saída,
+  duração), risco (queda máxima, sequência de perdas) e comparação com o backtest.
+- **Mensal (dia 1):** o mesmo, para o mês anterior.
+
+O histórico completo das operações fica nas Propriedades do script, em blocos.
+
 ## Funções úteis
 
-- `resumoCripto()`: banca, acerto e posições abertas.
+- `resumoCripto()`: relatório completo na hora.
+- `relatorioDiarioCripto()`: relatório diário na hora.
 - `diagnosticoCripto()`: o que aconteceu na última varredura.
 - `pararScannerCripto()`: remove só os acionadores deste robô.
 - `zerarSimulacaoCripto()`: recomeça a banca simulada.
