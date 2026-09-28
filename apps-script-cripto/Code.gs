@@ -31,8 +31,6 @@ const CRIPTO = {
   // Gestão para banca pequena
   RISCO: 0.01, MAX_POSICOES: 6, ORDEM_MIN: 5, ALAVANCAGEM: 2,
   CUSTO_IDA_VOLTA: 0.0012,
-  HOSTS: ['https://data-api.binance.vision', 'https://api.binance.com',
-    'https://api1.binance.com', 'https://api2.binance.com', 'https://api3.binance.com'],
   // Propriedades do script aceitam no máximo 9 KB por valor: guardamos só as
   // últimas operações; os totais ficam em st.stats.
   LOTE: 20, HISTORICO_MAX: 25, ERRO_ALERTA: 3, HORA_RESUMO: 21, ATRASO_MAX_MS: 3600 * 1000,
@@ -90,36 +88,75 @@ function criptoTelegram(msg) {
   return false;
 }
 
-// ------------------------------------------------------------ Binance (dados públicos)
-function criptoHosts() {
-  const bom = criptoGet('CRIPTO_HOST', null);
-  return bom ? [bom].concat(CRIPTO.HOSTS.filter(h => h !== bom)) : CRIPTO.HOSTS.slice();
+// ------------------------------------------------------------ dados de preço (públicos)
+// Os servidores do Google ficam nos EUA e a Binance pode recusar a conexão.
+// Por isso há fontes reserva: MEXC (mesmo formato da Binance) e KuCoin.
+// A estratégia usa preço e volume relativos da própria moeda; o preço é o
+// mesmo em todas as corretoras grandes por causa da arbitragem.
+const CRIPTO_FONTES = [
+  {nome: 'binance-vision', tipo: 'binance', host: 'https://data-api.binance.vision'},
+  {nome: 'binance', tipo: 'binance', host: 'https://api.binance.com'},
+  {nome: 'binance-api1', tipo: 'binance', host: 'https://api1.binance.com'},
+  {nome: 'binance-api2', tipo: 'binance', host: 'https://api2.binance.com'},
+  {nome: 'mexc', tipo: 'binance', host: 'https://api.mexc.com'},
+  {nome: 'kucoin', tipo: 'kucoin', host: 'https://api.kucoin.com'}
+];
+const CRIPTO_KUCOIN_TF = {'15m': '15min', '4h': '4hour', '1d': '1day'};
+const CRIPTO_TF_MS = {'15m': 900000, '4h': 4 * 3600000, '1d': 86400000};
+
+function criptoPedido(par, tf, limite, inicio) {
+  return {par: par, tf: tf, limite: limite, inicio: inicio || 0};
 }
 
-/** Busca vários caminhos da API em paralelo; tenta outro servidor se um falhar. */
-function criptoApiVarios(caminhos) {
-  const saida = new Array(caminhos.length).fill(null);
-  let faltam = caminhos.map((_, i) => i);
-  for (const host of criptoHosts()) {
+function criptoUrl(f, p) {
+  if (f.tipo === 'binance') {
+    return f.host + '/api/v3/klines?symbol=' + p.par + '&interval=' + p.tf + '&limit=' +
+      p.limite + (p.inicio ? '&startTime=' + p.inicio : '');
+  }
+  const fim = Math.floor(Date.now() / 1000);
+  const ini = p.inicio ? Math.floor(p.inicio / 1000) :
+    fim - Math.floor(p.limite * CRIPTO_TF_MS[p.tf] / 1000);
+  return f.host + '/api/v1/market/candles?type=' + CRIPTO_KUCOIN_TF[p.tf] + '&symbol=' +
+    p.par.replace(/USDT$/, '-USDT') + '&startAt=' + ini + '&endAt=' + fim;
+}
+
+/** Converte a resposta para o formato da Binance: [abre, o, h, l, c, v, fecha]. */
+function criptoLer(f, p, texto) {
+  let j;
+  try { j = JSON.parse(texto); } catch (e) { return null; }
+  if (f.tipo === 'binance') return Array.isArray(j) && j.length ? j : null;
+  if (!j || j.code !== '200000' || !Array.isArray(j.data) || !j.data.length) return null;
+  const dur = CRIPTO_TF_MS[p.tf];
+  return j.data.map(k => [Number(k[0]) * 1000, k[1], k[3], k[4], k[2], k[5],
+    Number(k[0]) * 1000 + dur - 1]).sort((a, b) => a[0] - b[0]);
+}
+
+function criptoFontes() {
+  const boa = criptoGet('CRIPTO_FONTE', null);
+  const i = CRIPTO_FONTES.findIndex(f => f.nome === boa);
+  return i < 0 ? CRIPTO_FONTES.slice() :
+    [CRIPTO_FONTES[i]].concat(CRIPTO_FONTES.filter((_, k) => k !== i));
+}
+
+/** Busca vários pedidos em paralelo; o que falhar tenta a próxima fonte. */
+function criptoApiVarios(pedidos) {
+  const saida = new Array(pedidos.length).fill(null);
+  let faltam = pedidos.map((_, i) => i);
+  for (const f of criptoFontes()) {
     if (!faltam.length) break;
-    const pedidos = faltam.map(i => ({url: host + caminhos[i], muteHttpExceptions: true}));
     let resps;
-    try { resps = UrlFetchApp.fetchAll(pedidos); } catch (e) { continue; }
+    try {
+      resps = UrlFetchApp.fetchAll(faltam.map(i => ({url: criptoUrl(f, pedidos[i]),
+        muteHttpExceptions: true})));
+    } catch (e) { continue; }
     const aindaFaltam = [];
     let algumOk = false;
     resps.forEach((r, k) => {
       const i = faltam[k];
-      const code = r.getResponseCode();
-      if (code === 200) {
-        saida[i] = JSON.parse(r.getContentText());
-        algumOk = true;
-      } else if (code === 400) {
-        saida[i] = {erro: 'moeda inválida'};  // par não existe: não adianta outro host
-      } else {
-        aindaFaltam.push(i);
-      }
+      const dados = r.getResponseCode() === 200 ? criptoLer(f, pedidos[i], r.getContentText()) : null;
+      if (dados) { saida[i] = dados; algumOk = true; } else aindaFaltam.push(i);
     });
-    if (algumOk) criptoSet('CRIPTO_HOST', host);
+    if (algumOk) criptoSet('CRIPTO_FONTE', f.nome);
     faltam = aindaFaltam;
   }
   return saida;
@@ -207,9 +244,8 @@ function rodarScannerCripto() {
 
 function criptoVarrer(st, agora, ultimoFechado) {
   const pares = CRIPTO.MOEDAS.map(m => m + 'USDT');
-  const caminhos = ['/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=400']
-    .concat(pares.map(p => '/api/v3/klines?symbol=' + p + '&interval=' + CRIPTO.TF +
-      '&limit=' + CRIPTO.CANDLES));
+  const caminhos = [criptoPedido('BTCUSDT', '1d', 400)]
+    .concat(pares.map(p => criptoPedido(p, CRIPTO.TF, CRIPTO.CANDLES)));
   let dados = [];
   for (let i = 0; i < caminhos.length; i += CRIPTO.LOTE) {
     dados = dados.concat(criptoApiVarios(caminhos.slice(i, i + CRIPTO.LOTE)));
@@ -282,8 +318,7 @@ function criptoAbrir(st, par, s, candleEmCurso, agora) {
 // ------------------------------------------------------------ conferência
 function criptoConferir(st, agora) {
   if (!st.abertas.length) return;
-  const caminhos = st.abertas.map(p => '/api/v3/klines?symbol=' + p.par +
-    '&interval=15m&limit=1000&startTime=' + p.abertura);
+  const caminhos = st.abertas.map(p => criptoPedido(p.par, '15m', 1000, p.abertura));
   const dados = criptoApiVarios(caminhos);
   const ficam = [];
   st.abertas.forEach((p, k) => {
@@ -357,13 +392,26 @@ function diagnosticoCripto() {
 
 // ------------------------------------------------------------ instalação
 function testarConexoesCripto() {
-  const r = criptoApiVarios(['/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=2']);
-  const binanceOk = Array.isArray(r[0]);
-  console.log('Binance: ' + (binanceOk ? 'OK via ' + criptoGet('CRIPTO_HOST', '?') : 'FALHOU'));
-  const tgOk = criptoTelegram('Teste de conexão do SCANNER CRIPTO: OK. Binance ' +
-    (binanceOk ? 'OK.' : 'FALHOU.'));
+  const p = criptoPedido('BTCUSDT', '4h', 5);
+  const linhas = [];
+  let primeira = null;
+  CRIPTO_FONTES.forEach(f => {
+    let txt;
+    try {
+      const r = UrlFetchApp.fetch(criptoUrl(f, p), {muteHttpExceptions: true});
+      const ok = r.getResponseCode() === 200 && criptoLer(f, p, r.getContentText());
+      txt = ok ? 'OK' : 'falhou (HTTP ' + r.getResponseCode() + ')';
+      if (ok && !primeira) primeira = f.nome;
+    } catch (e) { txt = 'falhou (' + String(e.message || e).slice(0, 60) + ')'; }
+    linhas.push(f.nome + ': ' + txt);
+  });
+  if (primeira) criptoSet('CRIPTO_FONTE', primeira);
+  console.log('Fontes de preço:\n' + linhas.join('\n'));
+  const tgOk = criptoTelegram('Teste de conexão do SCANNER CRIPTO\nTelegram: OK\n' +
+    'Fontes de preço:\n' + linhas.join('\n') +
+    (primeira ? '\nUsando: ' + primeira : '\nNENHUMA fonte de preço respondeu.'));
   console.log('Telegram: ' + (tgOk ? 'OK' : 'FALHOU (confira token e chat id)'));
-  return binanceOk && tgOk;
+  return !!primeira && tgOk;
 }
 
 function pararScannerCripto() {
@@ -394,5 +442,6 @@ function instalarScannerCripto() {
 function zerarSimulacaoCripto() {
   criptoProps().deleteProperty('CRIPTO_ESTADO');
   criptoProps().deleteProperty('CRIPTO_DIAG');
+  criptoProps().deleteProperty('CRIPTO_FONTE');
   console.log('Simulação zerada. Banca volta para ' + criptoUsd(CRIPTO.BANCA_INICIAL));
 }

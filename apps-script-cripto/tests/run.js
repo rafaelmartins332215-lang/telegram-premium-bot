@@ -47,7 +47,14 @@ function carregar(opts) {
       }
     },
     UrlFetchApp: {
-      fetch: (url, o) => { enviados.push(o.payload.text); return resp(200, {ok: true}); },
+      fetch: (url, o) => {
+        if (url.includes('api.telegram.org')) {
+          enviados.push(o.payload.text);
+          return resp(200, {ok: true});
+        }
+        const u = new URL(url);
+        return opts.binance(u.origin, u.searchParams);
+      },
       fetchAll: reqs => reqs.map(r => {
         const u = new URL(r.url);
         return opts.binance(u.origin, u.searchParams);
@@ -97,16 +104,23 @@ function cenario(o) {
   const candleAtual = Math.floor(Date.UTC(2026, 8, 28, 12) / H4) * H4;
   const agora = candleAtual + (o.minutos || 10) * 60000;
   const quinze = o.quinze || (() => []);
-  const hostRuim = o.hostRuim;
+  const bloqueados = o.bloqueados || [];
   return carregar({
     agora, props: o.props, gatilhos: o.gatilhos,
     binance: (origin, q) => {
-      if (hostRuim && origin === hostRuim) return {getResponseCode: () => 451, getContentText: () => ''};
-      const sym = q.get('symbol');
+      if (bloqueados.indexOf(origin) >= 0) return {getResponseCode: () => 451, getContentText: () => ''};
+      const kucoin = origin === 'https://api.kucoin.com';
+      const sym = kucoin ? q.get('symbol').replace('-', '') : q.get('symbol');
+      const tf = kucoin ? {'15min': '15m', '4hour': '4h', '1day': '1d'}[q.get('type')] : q.get('interval');
+      const ini = kucoin ? Number(q.get('startAt')) * 1000 : Number(q.get('startTime'));
       let body;
-      if (q.get('interval') === '1d') body = velasDia(agora, o.alta !== false);
-      else if (q.get('interval') === '15m') body = quinze(sym, Number(q.get('startTime')));
+      if (tf === '1d') body = velasDia(agora, o.alta !== false);
+      else if (tf === '15m') body = quinze(sym, ini);
       else body = velas4h(candleAtual, (o.rompem || []).indexOf(sym) >= 0);
+      if (kucoin) {  // KuCoin: segundos, mais novo primeiro, [t, abre, fecha, max, min, vol]
+        body = {code: '200000', data: body.slice().reverse().map(k =>
+          [String(k[0] / 1000), String(k[1]), String(k[4]), String(k[2]), String(k[3]), String(k[5])])};
+      }
       return {getResponseCode: () => 200, getContentText: () => JSON.stringify(body)};
     }
   });
@@ -198,11 +212,41 @@ teste('stop e alvo no mesmo candle: conta stop', () => {
   assert.ok(b2.estado().banca < 50);
 });
 
+const BINANCE = ['https://data-api.binance.vision', 'https://api.binance.com',
+  'https://api1.binance.com', 'https://api2.binance.com'];
+
 teste('usa o próximo servidor se um estiver bloqueado', () => {
-  const b = cenario({rompem: ['SOLUSDT'], hostRuim: 'https://data-api.binance.vision'});
+  const b = cenario({rompem: ['SOLUSDT'], bloqueados: [BINANCE[0]]});
   b.ctx.rodarScannerCripto();
   assert.strictEqual(b.estado().abertas.length, 1);
-  assert.strictEqual(JSON.parse(b.props.CRIPTO_HOST), 'https://api.binance.com');
+  assert.strictEqual(JSON.parse(b.props.CRIPTO_FONTE), 'binance');
+});
+
+teste('Binance toda bloqueada: usa a MEXC', () => {
+  const b = cenario({rompem: ['SOLUSDT'], bloqueados: BINANCE});
+  b.ctx.rodarScannerCripto();
+  assert.strictEqual(b.estado().abertas.length, 1);
+  assert.strictEqual(JSON.parse(b.props.CRIPTO_FONTE), 'mexc');
+});
+
+teste('Binance e MEXC bloqueadas: usa a KuCoin com o mesmo sinal', () => {
+  const b = cenario({rompem: ['SOLUSDT'], bloqueados: BINANCE.concat(['https://api.mexc.com'])});
+  b.ctx.rodarScannerCripto();
+  const st = b.estado();
+  assert.strictEqual(st.abertas.length, 1);
+  assert.strictEqual(JSON.parse(b.props.CRIPTO_FONTE), 'kucoin');
+  const ref = cenario({rompem: ['SOLUSDT']});
+  ref.ctx.rodarScannerCripto();
+  const a = st.abertas[0], r = ref.estado().abertas[0];
+  assert.ok(Math.abs(a.stop - r.stop) < 1e-9 && Math.abs(a.alvo - r.alvo) < 1e-9);
+});
+
+teste('teste de conexão lista as fontes e escolhe uma que funciona', () => {
+  const b = cenario({bloqueados: BINANCE});
+  assert.strictEqual(b.ctx.testarConexoesCripto(), true);
+  assert.strictEqual(JSON.parse(b.props.CRIPTO_FONTE), 'mexc');
+  const msg = b.enviados.find(m => m.includes('Fontes de preço'));
+  assert.ok(msg.includes('binance-vision: falhou (HTTP 451)') && msg.includes('mexc: OK'));
 });
 
 teste('instalar não mexe nos acionadores do Scanner Ouro', () => {

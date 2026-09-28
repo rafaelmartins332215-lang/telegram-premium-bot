@@ -1,0 +1,17 @@
+# Confere, de um servidor nos EUA (como os do Google), quais fontes de preço
+# o Scanner Cripto consegue ler.
+name: Fontes de preço do Scanner Cripto
+on:
+  push:
+    paths: ['apps-script-cripto/Code.gs', 'apps-script-cripto/tests/fontes_reais.js',
+            '.github/workflows/cripto-fontes.yml']
+  workflow_dispatch:
+jobs:
+  fontes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node apps-script-cripto/tests/fontes_reais.js
