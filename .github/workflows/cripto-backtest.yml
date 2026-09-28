@@ -1,0 +1,25 @@
+# Roda o backtest das estratégias de cripto com dados reais da Binance.
+# O resultado aparece no resumo da execução e como artefato para download.
+name: Backtest cripto
+on:
+  push:
+    paths: ['backtest/**', '.github/workflows/cripto-backtest.yml']
+  workflow_dispatch:
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r backtest/requirements.txt
+      - name: Backtest
+        run: |
+          python backtest/cripto_backtest.py --saida relatorio_backtest.md
+          cat relatorio_backtest.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-cripto
+          path: relatorio_backtest*
