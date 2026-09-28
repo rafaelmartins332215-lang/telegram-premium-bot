@@ -15,6 +15,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r backtest/requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: backtest/dados
+          key: binance-dados-${{ hashFiles('backtest/cripto_backtest.py') }}
+          restore-keys: binance-dados-
       - name: Backtest
         run: |
           python backtest/cripto_backtest.py --saida relatorio_backtest.md
@@ -23,6 +28,10 @@ jobs:
         run: |
           python backtest/daytrade_backtest.py --saida relatorio_daytrade.md
           cat relatorio_daytrade.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Backtest estratégias profissionais
+        run: |
+          python backtest/pro_backtest.py --saida relatorio_pro.md
+          cat relatorio_pro.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: backtest-cripto
