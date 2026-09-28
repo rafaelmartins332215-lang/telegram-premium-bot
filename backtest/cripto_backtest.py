@@ -80,13 +80,13 @@ def carregar(sim):
     return df[~df.index.duplicated()].sort_index()
 
 
-def sintetico(sim, seed):
+def sintetico(sim, seed, freq='1h', sd=0.008, drift=0.00005):
     rng = np.random.default_rng(seed)
-    idx = pd.date_range(INICIO + '-01', FIM + '-28', freq='1h', tz='UTC')
-    ret = rng.normal(0.00005, 0.008, len(idx))
+    idx = pd.date_range(INICIO + '-01', FIM + '-28', freq=freq, tz='UTC')
+    ret = rng.normal(drift, sd, len(idx))
     c = 100 * np.exp(np.cumsum(ret))
     o = np.r_[c[0], c[:-1]]
-    sp = np.abs(rng.normal(0, 0.004, len(idx))) * c
+    sp = np.abs(rng.normal(0, sd / 2, len(idx))) * c
     return pd.DataFrame({'open': o, 'high': np.maximum(o, c) + sp,
                          'low': np.minimum(o, c) - sp, 'close': c,
                          'volume': rng.lognormal(10, 0.5, len(idx))}, index=idx)

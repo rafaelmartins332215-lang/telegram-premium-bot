@@ -8,7 +8,7 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,7 +19,11 @@ jobs:
         run: |
           python backtest/cripto_backtest.py --saida relatorio_backtest.md
           cat relatorio_backtest.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Backtest day trade
+        run: |
+          python backtest/daytrade_backtest.py --saida relatorio_daytrade.md
+          cat relatorio_daytrade.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: backtest-cripto
-          path: relatorio_backtest*
+          path: relatorio_*
